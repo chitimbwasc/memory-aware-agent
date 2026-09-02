@@ -1,12 +1,14 @@
 """
-Memory Manager: typed operations for the seven stores.
-This is an initial implementation focusing on conversational reads/writes,
-a simple semantic store read/write using brute-force cosine at fixture scale,
-and basic tool-log persistence.
+Memory Manager extended with toolbox registration, toolbox retrieval, and budget monitoring.
 
-Notes:
-- Embeddings are stored as JSON lists (embedding JSON text) to make inspection easier.
-- Config values (token budget, distance strategy, ks) live in the config table.
+Added functions:
+- register_tool(name, description, signature, metadata, augment=False, augmented_text=None)
+- toolbox_retrieve(query, k=None)
+- count_toolbox_entries()
+- estimate_token_usage(text) -> int
+- budget_status_for_text(text, override_budget=None) -> (status, estimate)
+
+Toolbox entries are stored in semantic_store_kv with store_name 'TOOLBOX_MEMORY' and metadata must include {'name': tool_name}
 """
 
 import sqlite3
@@ -43,6 +45,7 @@ class MemoryManager:
         cur.execute("INSERT OR IGNORE INTO config(key, value) VALUES(?, ?)", ("token_budget", "256000"))
         cur.execute("INSERT OR IGNORE INTO config(key, value) VALUES(?, ?)", ("toolbox_k", "5"))
         cur.execute("INSERT OR IGNORE INTO config(key, value) VALUES(?, ?)", ("kb_k", "3"))
+        cur.execute("INSERT OR IGNORE INTO config(key, value) VALUES(?, ?)", ("distance_strategy", "cosine"))
         self.conn.commit()
 
     def get_config(self, key: str) -> Optional[str]:
@@ -126,6 +129,45 @@ class MemoryManager:
         self.conn.commit()
         return rid
 
+    # Toolbox registration & retrieval (R4, R5, D11)
+    def register_tool(self, name: str, description: str, signature: Dict = None, metadata: Dict = None, augment_text: Optional[str] = None) -> str:
+        """Idempotent registration by tool name. Stores name in metadata for deduplication."""
+        # check existing by name
+        cur = self.conn.cursor()
+        cur.execute("SELECT id FROM semantic_store_kv WHERE store_name = ? AND json_extract(metadata, '$.name') = ?", ("TOOLBOX_MEMORY", name))
+        if cur.fetchone():
+            # return existing id
+            cur.execute("SELECT id FROM semantic_store_kv WHERE store_name = ? AND json_extract(metadata, '$.name') = ?", ("TOOLBOX_MEMORY", name))
+            return cur.fetchone()[0]
+        text = augment_text if augment_text else description
+        meta = metadata or {}
+        meta.update({"name": name, "signature": signature or {}})
+        return self.write_semantic("TOOLBOX_MEMORY", text, meta)
+
+    def toolbox_retrieve(self, query: str, k: Optional[int] = None) -> List[Dict]:
+        k = k or int(self.get_config("toolbox_k") or 5)
+        results = self.semantic_search("TOOLBOX_MEMORY", query, k * 3)  # fetch more, dedupe
+        seen = set()
+        out = []
+        for r in results:
+            name = r["metadata"].get("name")
+            if not name:
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            # map to RetrievedToolSchema-like dict
+            func = {"name": name, "description": r["text"], "parameters": r["metadata"].get("signature", {})}
+            out.append({"type": "function", "function": func})
+            if len(out) >= k:
+                break
+        return out
+
+    def count_toolbox_entries(self) -> int:
+        cur = self.conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM semantic_store_kv WHERE store_name = ?", ("TOOLBOX_MEMORY",))
+        return cur.fetchone()[0]
+
     # Tool log (R10)
     def write_tool_log(self, thread_id: str, tool_name: str, tool_args: Dict, result: str, status: str = "success", error_message: str = None) -> str:
         rid = uuid.uuid4().hex[:8]
@@ -163,3 +205,20 @@ class MemoryManager:
         cur.execute("SELECT id, role, content, timestamp FROM conversational_memory WHERE thread_id = ? AND summary_id = ? ORDER BY timestamp ASC", (row["thread_id"], summary_id))
         rows = [dict(r) for r in cur.fetchall()]
         return {"summary": row["summary"], "full_content": row["full_content"], "messages": rows}
+
+    # Budget monitor (R6)
+    def estimate_token_usage(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+    def budget_status_for_text(self, text: str, override_budget: Optional[int] = None) -> Dict:
+        est = self.estimate_token_usage(text)
+        budget = int(override_budget or int(self.get_config("token_budget") or 256000))
+        pct = est * 100.0 / budget
+        if pct < 50:
+            status = "ok"
+        elif pct < 80:
+            status = "warning"
+        else:
+            status = "critical"
+        return {"status": status, "estimate": est, "budget": budget, "pct": pct}
+
