@@ -1,12 +1,12 @@
 """
-LLM client abstractions.
+LLM client abstractions and scripted behaviors for tests.
 
-Provides a ScriptedLLMClient for offline deterministic tests and a thin OpenAI wrapper
-for live runs. The scripted client supports two simple behaviors used by tests:
-- echo: returns a canned assistant response
-- extract_entities / summarize could be added later
+ScriptedLLMClient supports exact-match scripts and special markers:
+- if the last user message starts with 'SUMMARIZE_THREAD' it returns a canned structured summary
+  with the four headings required by R8.
+- if the last user message starts with 'EXTRACT_ENTITIES' it returns a bullet list of entities.
 
-This file intentionally keeps the interface minimal: call(messages, tools=None) -> dict
+OpenAIClient remains a thin wrapper.
 """
 from typing import List, Dict, Any, Optional
 import os
@@ -24,7 +24,8 @@ class ScriptedLLMClient:
     """Deterministic scripted client for offline testing.
 
     Provide a `script` dict mapping input triggers to canned outputs. If no match is found
-    it returns a simple default assistant reply.
+    it returns a simple default assistant reply. It recognizes SUMMARIZE_THREAD and
+    EXTRACT_ENTITIES markers.
     """
 
     def __init__(self, script: Optional[Dict[str, str]] = None):
@@ -37,6 +38,20 @@ class ScriptedLLMClient:
         # simple exact-match scripted behaviour
         if last in self.script:
             return {"role": "assistant", "content": self.script[last]}
+        # special markers
+        if isinstance(last, str) and last.startswith("SUMMARIZE_THREAD"):
+            # return a structured 4-heading summary and a deterministic label
+            summary = (
+                "Technical Information:\n- Kestrel streaming memory consolidation reduces resumption errors.\n\n"
+                "Emotional Context:\n- User expressed curiosity and urgency about reproducibility.\n\n"
+                "Entities & References:\n- Kestrel (KX-2025-011)\n- Heron (HX-2024-007)\n\n"
+                "Action Items & Decisions:\n- Ingest Kestrel notes; summarize and mark rows for consolidation.\n"
+            )
+            return {"role": "assistant", "content": summary}
+        if isinstance(last, str) and last.startswith("EXTRACT_ENTITIES"):
+            # produce two entities as bullets
+            ents = "- PERSON: R. Marlow\n- SYSTEM: Kestrel Simulation Framework\n"
+            return {"role": "assistant", "content": ents}
         # default echo
         return {"role": "assistant", "content": f"I received: {last[:200]}"}
 
