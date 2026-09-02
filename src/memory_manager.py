@@ -206,6 +206,24 @@ class MemoryManager:
         rows = [dict(r) for r in cur.fetchall()]
         return {"summary": row["summary"], "full_content": row["full_content"], "messages": rows}
 
+    # Entity write/read
+    def write_entity(self, name: str, type: str, description: str, metadata: Dict = None) -> str:
+        rid = uuid.uuid4().hex[:8]
+        ts = _now_iso()
+        emb = embeddings.embed_text([description])[0] if description else None
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO entity_memory(id, name, type, description, embedding, metadata, created_at) VALUES(?,?,?,?,?,?,?)",
+            (rid, name, type, description, json.dumps(emb) if emb else None, json.dumps(metadata or {}), ts),
+        )
+        self.conn.commit()
+        return rid
+
+    def list_entities(self, limit: int = 100) -> List[Dict]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT id, name, type, description, metadata, created_at FROM entity_memory ORDER BY created_at DESC LIMIT ?", (limit,))
+        return [dict(r) for r in cur.fetchall()]
+
     # Budget monitor (R6)
     def estimate_token_usage(self, text: str) -> int:
         return max(1, len(text) // 4)
