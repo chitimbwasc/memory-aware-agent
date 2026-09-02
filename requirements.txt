@@ -1,0 +1,10 @@
+# Core requirements (unpinned by design; lockfile will be generated at build time)
+sentence-transformers
+torch
+numpy
+openai
+python-dotenv
+pytest
+pytest-mock
+pymupdf
+arxiv
